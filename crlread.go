@@ -2,11 +2,12 @@ package main
 
 import (
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"flag"
 	"fmt"
+	"github.com/boltdb/bolt"
 	"io/ioutil"
 	"os"
+	"sync"
 )
 
 func main() {
@@ -23,6 +24,7 @@ func main() {
 
 	crlFile := flag.Arg(0)
 	crtFile := flag.Arg(1)
+	dbFile := "crl.db"
 
 	crlBytes, err := ioutil.ReadFile(crlFile)
 
@@ -50,13 +52,46 @@ func main() {
 		panic(err)
 	}
 
-	var name pkix.Name
+	db, err := bolt.Open(dbFile, 0600, nil)
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
 
-	name.FillFromRDNSequence(&crlList.TBSCertList.Issuer)
-
-	for _, cert := range crlList.TBSCertList.RevokedCertificates {
-		fmt.Printf("%v, %v\n", cert.SerialNumber, cert.RevocationTime)
+	err = db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte("test"))
+		return err
+	})
+	if err != nil {
+		panic(err)
 	}
 
-	fmt.Printf("%v\n", name.CommonName)
+	var waitGroup sync.WaitGroup
+
+	for _, cert := range crlList.TBSCertList.RevokedCertificates {
+		sNum := cert.SerialNumber.Bytes()
+		bTime, err := cert.RevocationTime.GobEncode()
+		if err != nil {
+			panic(err)
+		}
+		waitGroup.Add(1)
+		go func(db *bolt.DB, s []byte, t []byte) {
+			err = db.Batch(func(tx *bolt.Tx) error {
+				bucket := tx.Bucket([]byte("test"))
+				if err != nil {
+					return err
+				}
+				err = bucket.Put(s, t)
+				if err != nil {
+					return err
+				}
+				waitGroup.Done()
+				return nil
+			})
+			if err != nil {
+				panic(err)
+			}
+		}(db, sNum, bTime)
+	}
+	waitGroup.Wait()
 }
